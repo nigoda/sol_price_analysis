@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 # ================= CONFIG =================
 SYMBOL = "SOLUSDT"
@@ -14,45 +13,57 @@ EMA_FAST = 9
 EMA_SLOW = 21
 ATR_PERIOD = 14
 
-REFRESH_MS = 5000  # 5 seconds (Binance 2H candles don't change every second)
-
-# ================= STREAMLIT SETUP =================
+# ================= STREAMLIT PAGE =================
 st.set_page_config(
-    page_title="SOL/USDT EMA + ATR Signals",
+    page_title="SOL/USDT EMA Strategy",
     layout="wide"
 )
 
-st.title("📈 SOL/USDT – EMA Crossover with TP / SL")
-st.caption("Live Binance data | Non-repainting signals")
+st.title("📈 SOL/USDT – EMA Crossover Strategy")
+st.caption("Binance data • Non-repainting • ATR-based TP/SL")
 
-# Auto refresh
-st_autorefresh(interval=REFRESH_MS, key="refresh")
-
-# Persist signals
+# ================= SESSION STATE =================
 if "signals" not in st.session_state:
     st.session_state.signals = []
 
-# ================= FETCH DATA =================
+# ================= FETCH DATA (451 SAFE) =================
 @st.cache_data(ttl=30)
 def fetch_data():
-    url = "https://api.binance.com/api/v3/klines"
+    urls = [
+        "https://api1.binance.com/api/v3/klines",
+        "https://api2.binance.com/api/v3/klines",
+        "https://api3.binance.com/api/v3/klines"
+    ]
+
     params = {
         "symbol": SYMBOL,
         "interval": INTERVAL,
         "limit": LIMIT
     }
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
 
-    df = pd.DataFrame(r.json(), columns=[
-        "time","open","high","low","close","volume",
-        "close_time","qav","trades","tb","tq","ignore"
-    ])
+    last_error = None
 
-    df["time"] = pd.to_datetime(df["time"], unit="ms")
-    df[["open","high","low","close"]] = df[["open","high","low","close"]].astype(float)
+    for url in urls:
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
 
-    return df
+            df = pd.DataFrame(r.json(), columns=[
+                "time","open","high","low","close","volume",
+                "close_time","qav","trades","tb","tq","ignore"
+            ])
+
+            df["time"] = pd.to_datetime(df["time"], unit="ms")
+            df[["open","high","low","close"]] = df[
+                ["open","high","low","close"]
+            ].astype(float)
+
+            return df
+
+        except Exception as e:
+            last_error = e
+
+    raise RuntimeError(f"Binance blocked all endpoints: {last_error}")
 
 # ================= INDICATORS =================
 def atr(df, period=14):
@@ -62,11 +73,23 @@ def atr(df, period=14):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-# ================= MAIN LOGIC =================
+# ================= UI CONTROLS =================
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+        st.experimental_rerun()
+
+with col2:
+    if st.button("🧹 Clear Signals"):
+        st.session_state.signals.clear()
+
+# ================= MAIN =================
 try:
     df = fetch_data()
 except Exception as e:
-    st.error(f"Data fetch error: {e}")
+    st.error(e)
     st.stop()
 
 df["ema_fast"] = df["close"].ewm(span=EMA_FAST).mean()
@@ -91,29 +114,27 @@ if len(df) > 2 and not np.isnan(df["atr"].iloc[-1]):
     # BUY
     if prev["ema_fast"] < prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]:
         if not st.session_state.signals or st.session_state.signals[-1]["time"] != last["time"]:
-            signal = {
+            st.session_state.signals.append({
                 "type": "BUY",
                 "time": last["time"],
                 "price": last["close"],
                 "tp": last["close"] + 2 * last["atr"],
                 "sl": last["close"] - last["atr"],
                 "margin": margin
-            }
-            st.session_state.signals.append(signal)
+            })
             st.toast("🚀 BUY Signal", icon="🟢")
 
     # SELL
     elif prev["ema_fast"] > prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]:
         if not st.session_state.signals or st.session_state.signals[-1]["time"] != last["time"]:
-            signal = {
+            st.session_state.signals.append({
                 "type": "SELL",
                 "time": last["time"],
                 "price": last["close"],
                 "tp": last["close"] - 2 * last["atr"],
                 "sl": last["close"] + last["atr"],
                 "margin": margin
-            }
-            st.session_state.signals.append(signal)
+            })
             st.toast("🔻 SELL Signal", icon="🔴")
 
 # ================= PLOT =================
@@ -128,21 +149,23 @@ for i in range(len(df)):
             [df["open"].iloc[i], df["close"].iloc[i]],
             color=color, linewidth=3)
 
-ax.plot(df["time"], df["ema_fast"], "--", label="EMA 9", color="blue")
-ax.plot(df["time"], df["ema_slow"], "--", label="EMA 21", color="orange")
+ax.plot(df["time"], df["ema_fast"], "--", color="blue", label="EMA 9")
+ax.plot(df["time"], df["ema_slow"], "--", color="orange", label="EMA 21")
 
 current_price = df["close"].iloc[-1]
 ax.axhline(current_price, linestyle=":", color="black")
 ax.text(df["time"].iloc[-1], current_price, f"{current_price:.2f}",
-        va="center", ha="left", fontweight="bold")
+        ha="left", va="center", fontweight="bold")
 
 for s in st.session_state.signals[-10:]:
     c = "green" if s["type"] == "BUY" else "red"
     ax.scatter(s["time"], s["price"], color=c, s=80)
-    ax.hlines(s["tp"], s["time"], df["time"].iloc[-1], linestyles="dotted", colors="blue")
-    ax.hlines(s["sl"], s["time"], df["time"].iloc[-1], linestyles="dotted", colors="orange")
+    ax.hlines(s["tp"], s["time"], df["time"].iloc[-1],
+              colors="blue", linestyles="dotted")
+    ax.hlines(s["sl"], s["time"], df["time"].iloc[-1],
+              colors="orange", linestyles="dotted")
 
-ax.set_title("SOL/USDT 2H – EMA Crossover Strategy")
+ax.set_title("SOL/USDT 2H EMA Strategy")
 ax.set_xlabel("Time")
 ax.set_ylabel("Price")
 ax.legend()
@@ -153,4 +176,4 @@ st.pyplot(fig)
 # ================= SIGNAL TABLE =================
 if st.session_state.signals:
     st.subheader("📋 Signal History")
-    st.dataframe(pd.DataFrame(st.session_state.signals).iloc[::-1])
+    st.dataframe(pd.DataFrame(st.session_state.signals)[::-1])
