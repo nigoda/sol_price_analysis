@@ -6,7 +6,7 @@ import streamlit as st
 
 # ================= CONFIG =================
 SYMBOL = "SOLUSDT"
-INTERVAL = "2h"
+INTERVAL_MIN = 120      # 2H candles
 LIMIT = 200
 
 EMA_FAST = 9
@@ -14,56 +14,46 @@ EMA_SLOW = 21
 ATR_PERIOD = 14
 
 # ================= STREAMLIT PAGE =================
-st.set_page_config(
-    page_title="SOL/USDT EMA Strategy",
-    layout="wide"
-)
+st.set_page_config(page_title="SOL/USDT EMA Strategy", layout="wide")
 
 st.title("📈 SOL/USDT – EMA Crossover Strategy")
-st.caption("Binance data • Non-repainting • ATR-based TP/SL")
+st.caption("Bybit public data • Non-repainting • ATR-based TP/SL")
 
 # ================= SESSION STATE =================
 if "signals" not in st.session_state:
     st.session_state.signals = []
 
-# ================= FETCH DATA (451 SAFE) =================
-@st.cache_data(ttl=30)
+# ================= FETCH DATA (BYBIT) =================
+@st.cache_data(ttl=60)
 def fetch_data():
-    urls = [
-        "https://api1.binance.com/api/v3/klines",
-        "https://api2.binance.com/api/v3/klines",
-        "https://api3.binance.com/api/v3/klines"
-    ]
-
+    url = "https://api.bybit.com/v5/market/kline"
     params = {
+        "category": "linear",
         "symbol": SYMBOL,
-        "interval": INTERVAL,
+        "interval": INTERVAL_MIN,
         "limit": LIMIT
     }
 
-    last_error = None
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json()
 
-    for url in urls:
-        try:
-            r = requests.get(url, params=params, timeout=10)
-            r.raise_for_status()
+    if data.get("retCode") != 0:
+        raise RuntimeError(data.get("retMsg"))
 
-            df = pd.DataFrame(r.json(), columns=[
-                "time","open","high","low","close","volume",
-                "close_time","qav","trades","tb","tq","ignore"
-            ])
+    rows = data["result"]["list"]
+    rows.reverse()  # oldest → newest
 
-            df["time"] = pd.to_datetime(df["time"], unit="ms")
-            df[["open","high","low","close"]] = df[
-                ["open","high","low","close"]
-            ].astype(float)
+    df = pd.DataFrame(rows, columns=[
+        "time", "open", "high", "low", "close", "volume", "turnover"
+    ])
 
-            return df
+    df["time"] = pd.to_datetime(df["time"].astype(int), unit="ms")
+    df[["open", "high", "low", "close"]] = df[
+        ["open", "high", "low", "close"]
+    ].astype(float)
 
-        except Exception as e:
-            last_error = e
-
-    raise RuntimeError(f"Binance blocked all endpoints: {last_error}")
+    return df
 
 # ================= INDICATORS =================
 def atr(df, period=14):
@@ -73,7 +63,7 @@ def atr(df, period=14):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-# ================= UI CONTROLS =================
+# ================= UI =================
 col1, col2 = st.columns(2)
 
 with col1:
@@ -152,9 +142,9 @@ for i in range(len(df)):
 ax.plot(df["time"], df["ema_fast"], "--", color="blue", label="EMA 9")
 ax.plot(df["time"], df["ema_slow"], "--", color="orange", label="EMA 21")
 
-current_price = df["close"].iloc[-1]
-ax.axhline(current_price, linestyle=":", color="black")
-ax.text(df["time"].iloc[-1], current_price, f"{current_price:.2f}",
+price = df["close"].iloc[-1]
+ax.axhline(price, linestyle=":", color="black")
+ax.text(df["time"].iloc[-1], price, f"{price:.2f}",
         ha="left", va="center", fontweight="bold")
 
 for s in st.session_state.signals[-10:]:
@@ -165,7 +155,7 @@ for s in st.session_state.signals[-10:]:
     ax.hlines(s["sl"], s["time"], df["time"].iloc[-1],
               colors="orange", linestyles="dotted")
 
-ax.set_title("SOL/USDT 2H EMA Strategy")
+ax.set_title("SOL/USDT 2H EMA Strategy (Bybit)")
 ax.set_xlabel("Time")
 ax.set_ylabel("Price")
 ax.legend()
